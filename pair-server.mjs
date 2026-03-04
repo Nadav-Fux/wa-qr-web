@@ -17,11 +17,12 @@ import { makeWASocket, useMultiFileAuthState, makeCacheableSignalKeyStore, Disco
 import QRCode from 'qrcode';
 import fs from 'fs';
 import http from 'http';
-import { Boom } from '@hapi/boom';
+import path from 'path';
+import { execSync } from 'child_process';
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.PORT || '8899');
+const PORT = parseInt(process.env.PORT || '8899', 10) || 8899;
 const AUTH_DIR = process.env.AUTH_DIR || './auth';
 const BROWSER_NAME = process.env.BROWSER_NAME || 'WA-QR-Web';
 const TUNNEL = process.argv.includes('--tunnel') || process.env.TUNNEL === '1';
@@ -32,10 +33,23 @@ const TUNNEL = process.argv.includes('--tunnel') || process.env.TUNNEL === '1';
 //
 // As of March 2026: 1034074495
 // Previous (broken):  1027934701
-const WA_VERSION_OVERRIDE = process.env.WA_VERSION
-  ? JSON.parse(process.env.WA_VERSION)
-  : null;
+let WA_VERSION_OVERRIDE = null;
+if (process.env.WA_VERSION) {
+  try {
+    WA_VERSION_OVERRIDE = JSON.parse(process.env.WA_VERSION);
+  } catch (e) {
+    console.error(`[ERROR] Invalid WA_VERSION format: ${process.env.WA_VERSION}`);
+    console.error('[ERROR] Expected format: [2,3000,1034074495]');
+    process.exit(1);
+  }
+}
 const WA_VERSION_FALLBACK = [2, 3000, 1034074495];
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -54,8 +68,8 @@ let tunnelUrl = '';          // Set when --tunnel is active
 // Real incident: Spark server crash-looped for 7 days because supervisor had
 // autorestart=true with no retry limit. Hundreds of reconnection attempts.
 //
-const MAX_RECONNECTS = parseInt(process.env.MAX_RECONNECTS || '5');  // max retries before cooldown
-const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000');   // 5 min cooldown after max retries
+const MAX_RECONNECTS = parseInt(process.env.MAX_RECONNECTS || '5', 10) || 5;
+const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000', 10) || 300000;
 let reconnectCount = 0;
 let lastReconnect = 0;
 
@@ -93,6 +107,12 @@ function safeReconnect(delaySec, reason) {
 let currentSock = null;  // Track socket for graceful shutdown
 
 async function connect() {
+  // Close previous socket to prevent event listener leak
+  if (currentSock) {
+    try { currentSock.end(undefined); } catch (_) {}
+    currentSock = null;
+  }
+
   // Clean auth dir on first run
   if (qrCount === 0) {
     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
@@ -135,10 +155,14 @@ async function connect() {
     // ── New QR code generated ──
     if (update.qr) {
       qrCount++;
-      const png = await QRCode.toBuffer(update.qr, { scale: 8 });
-      latestQRBase64 = png.toString('base64');
-      status = 'scan';
-      console.log(`[QR #${qrCount}] New QR code ready — open http://localhost:${PORT} to scan`);
+      try {
+        const png = await QRCode.toBuffer(update.qr, { scale: 8 });
+        latestQRBase64 = png.toString('base64');
+        status = 'scan';
+        console.log(`[QR #${qrCount}] New QR code ready — open http://localhost:${PORT} to scan`);
+      } catch (e) {
+        console.error('[ERROR] Failed to render QR code:', e.message);
+      }
     }
 
     // ── Connected ──
@@ -166,7 +190,8 @@ async function connect() {
 
     // ── Disconnected ──
     if (update.connection === 'close') {
-      const reason = new Boom(update.lastDisconnect?.error)?.output?.statusCode;
+      const err = update.lastDisconnect?.error;
+      const reason = err?.output?.statusCode || err?.statusCode;
       console.log(`[CLOSE] code=${reason}`);
 
       if (reason === DisconnectReason.restartRequired || reason === 515) {
@@ -193,6 +218,7 @@ async function connect() {
 
       } else {
         safeReconnect(5, `Unknown close reason (${reason})`);
+      }
     }
   });
 }
@@ -229,7 +255,7 @@ img{max-width:300px;width:100%;border-radius:12px;background:#fff;padding:12px}
 ${qrImg}
 ${extra}
 </div>
-${tunnelUrl ? '<div style="margin-top:12px;font-size:0.85em;opacity:0.7">Public URL: <a href="' + tunnelUrl + '" style="color:#93c5fd">' + tunnelUrl + '</a></div>' : ''}
+${tunnelUrl ? '<div style="margin-top:12px;font-size:0.85em;opacity:0.7">Public URL: <a href="' + escapeHtml(tunnelUrl) + '" style="color:#93c5fd">' + escapeHtml(tunnelUrl) + '</a></div>' : ''}
 <div class="footer">Auto-refreshes every 8 seconds</div>
 <script>setInterval(()=>location.reload(),8000)</script>
 </body></html>`;
@@ -268,15 +294,24 @@ const server = http.createServer((req, res) => {
   // Health check endpoint (for monitoring)
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status, connectedId, qrCount, reconnectCount, maxReconnects: MAX_RECONNECTS }));
+    res.end(JSON.stringify({ status, connected: status === 'connected', qrCount, reconnectCount, maxReconnects: MAX_RECONNECTS }));
     return;
   }
 
   // Download credentials as tar.gz (for remote servers)
+  // Only available from localhost to prevent credential theft over the network
   if (req.url === '/download-creds' && status === 'connected') {
+    const remoteIp = req.socket.remoteAddress;
+    const isLocal = remoteIp === '127.0.0.1' || remoteIp === '::1' || remoteIp === '::ffff:127.0.0.1';
+    if (!isLocal) {
+      res.writeHead(403, { 'Content-Type': 'text/plain' });
+      res.end('Credential download is only available from localhost for security.');
+      return;
+    }
     try {
-      const { execSync } = await import('child_process');
-      const tarball = execSync(`tar -czf - -C "${AUTH_DIR}" .`);
+      // Use path.resolve to prevent path traversal; avoid shell interpolation
+      const resolvedDir = path.resolve(AUTH_DIR);
+      const tarball = execSync('tar -czf - .', { cwd: resolvedDir });
       res.writeHead(200, {
         'Content-Type': 'application/gzip',
         'Content-Disposition': 'attachment; filename="wa-credentials.tar.gz"',
@@ -284,7 +319,7 @@ const server = http.createServer((req, res) => {
       res.end(tarball);
     } catch (e) {
       res.writeHead(500, { 'Content-Type': 'text/plain' });
-      res.end('Failed to create credentials archive: ' + e.message);
+      res.end('Failed to create credentials archive.');
     }
     return;
   }
@@ -294,9 +329,9 @@ const server = http.createServer((req, res) => {
 
   switch (status) {
     case 'connected':
-      statusText = `Connected as ${connectedId}`;
+      statusText = `Connected as ${escapeHtml(connectedId)}`;
       qrImg = '<div class="check">&#9989;</div>';
-      extra = '<p style="opacity:0.7">Credentials saved to <code>' + AUTH_DIR + '/</code></p>'
+      extra = '<p style="opacity:0.7">Credentials saved to <code>' + escapeHtml(AUTH_DIR) + '/</code></p>'
         + '<a href="/download-creds" style="display:inline-block;margin-top:12px;padding:10px 24px;background:#25D366;color:#000;border-radius:8px;text-decoration:none;font-weight:600">Download Credentials</a>'
         + '<p style="opacity:0.5;font-size:0.8em;margin-top:8px">Extract with: tar -xzf wa-credentials.tar.gz -C ./auth</p>';
       break;
@@ -327,7 +362,12 @@ const server = http.createServer((req, res) => {
   }
 
   const html = HTML_PAGE(status, statusText, qrImg, extra);
-  res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-store' });
+  res.writeHead(200, {
+    'Content-Type': 'text/html',
+    'Cache-Control': 'no-store',
+    'Content-Security-Policy': "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'",
+    'X-Content-Type-Options': 'nosniff',
+  });
   res.end(html);
 });
 

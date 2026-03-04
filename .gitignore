@@ -1,7 +1,4 @@
 node_modules/
 auth/
-auth2/
-auth3/
-auth_final/
 *.log
 .DS_Store

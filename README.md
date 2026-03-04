@@ -217,7 +217,7 @@ scp -r user@server:~/wa-qr-web/auth/* ./credentials/
 docker cp auth/. my-container:/app/credentials/
 ```
 
-### Bug 5: Ghost Sessions After Ctrl+C
+### Bug 4: Ghost Sessions After Ctrl+C
 
 **What happens**: You kill the pairing server with Ctrl+C. The WebSocket doesn't close properly. WhatsApp thinks you're still connected. Next time you try to pair, you get weird errors like "device already linked" or the QR won't generate.
 
@@ -256,6 +256,12 @@ This tool works with both WhatsApp and WhatsApp Business. The pairing flow is id
 | `GET /qr.png` | Raw QR code as PNG image |
 | `GET /health` | JSON: `{ status, connectedId, qrCount, reconnectCount, maxReconnects }` |
 | `GET /download-creds` | Download credentials as `tar.gz` (only available after successful pairing) |
+
+## Disclaimer
+
+This tool uses [Baileys](https://github.com/WhiskeySockets/Baileys), an unofficial WhatsApp Web API library. Using unofficial clients may violate WhatsApp's Terms of Service and could result in your account being banned. Use at your own risk.
+
+The credentials saved in `auth/` provide full access to your WhatsApp session (reading messages, sending messages, etc.). **Treat them like passwords.** Never expose the `/download-creds` endpoint to the public internet. To revoke access, go to WhatsApp > Settings > Linked Devices and unlink the session.
 
 ## License
 

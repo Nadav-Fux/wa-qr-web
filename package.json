@@ -17,11 +17,13 @@
     "whatsapp-bot",
     "qr-server"
   ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "author": "Nadav Fux",
   "license": "MIT",
   "dependencies": {
-    "@hapi/boom": "^10.0.0",
-    "@whiskeysockets/baileys": "^7.0.0",
+    "@whiskeysockets/baileys": "^6.7.16 || ^7.0.0-rc.1",
     "qrcode": "^1.5.4"
   },
   "optionalDependencies": {
