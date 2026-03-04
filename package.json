@@ -6,7 +6,7 @@
   "main": "pair-server.mjs",
   "scripts": {
     "start": "node pair-server.mjs",
-    "tunnel": "cloudflared tunnel --url http://localhost:8899"
+    "start:tunnel": "node pair-server.mjs --tunnel"
   },
   "keywords": [
     "whatsapp",
@@ -23,5 +23,8 @@
     "@hapi/boom": "^10.0.0",
     "@whiskeysockets/baileys": "^7.0.0",
     "qrcode": "^1.5.4"
+  },
+  "optionalDependencies": {
+    "localtunnel": "^2.0.0"
   }
 }

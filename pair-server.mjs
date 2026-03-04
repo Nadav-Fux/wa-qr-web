@@ -24,6 +24,7 @@ import { Boom } from '@hapi/boom';
 const PORT = parseInt(process.env.PORT || '8899');
 const AUTH_DIR = process.env.AUTH_DIR || './auth';
 const BROWSER_NAME = process.env.BROWSER_NAME || 'WA-QR-Web';
+const TUNNEL = process.argv.includes('--tunnel') || process.env.TUNNEL === '1';
 
 // WhatsApp protocol version — this is the #1 reason pairing fails.
 // If you get HTTP 405 errors, update this number.
@@ -42,6 +43,7 @@ let latestQRBase64 = '';
 let status = 'waiting';     // waiting | scan | reconnecting | connected | rate-limited
 let connectedId = '';
 let qrCount = 0;
+let tunnelUrl = '';          // Set when --tunnel is active
 
 // ─── Anti-Crash-Loop / Rate Limit Protection ─────────────────────────────────
 //
@@ -227,6 +229,7 @@ img{max-width:300px;width:100%;border-radius:12px;background:#fff;padding:12px}
 ${qrImg}
 ${extra}
 </div>
+${tunnelUrl ? '<div style="margin-top:12px;font-size:0.85em;opacity:0.7">Public URL: <a href="' + tunnelUrl + '" style="color:#93c5fd">' + tunnelUrl + '</a></div>' : ''}
 <div class="footer">Auto-refreshes every 8 seconds</div>
 <script>setInterval(()=>location.reload(),8000)</script>
 </body></html>`;
@@ -328,14 +331,39 @@ const server = http.createServer((req, res) => {
   res.end(html);
 });
 
-server.listen(PORT, '0.0.0.0', () => {
+server.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n  wa-qr-web running on http://localhost:${PORT}\n`);
-  console.log('  Open this URL in your browser to scan the QR code.');
-  console.log('  For remote servers, use: cloudflared tunnel --url http://localhost:' + PORT);
-  console.log('');
-});
 
-connect();
+  if (TUNNEL) {
+    // Built-in tunnel — no cloudflared or signup needed
+    try {
+      const localtunnel = (await import('localtunnel')).default;
+      const tunnel = await localtunnel({ port: PORT });
+      tunnelUrl = tunnel.url;
+      console.log(`  Public URL: ${tunnelUrl}\n`);
+      console.log('  Open this URL on your phone to scan the QR code.');
+      console.log('  The tunnel closes when you stop the server.\n');
+      tunnel.on('close', () => { tunnelUrl = ''; });
+    } catch (e) {
+      if (e.code === 'ERR_MODULE_NOT_FOUND' || e.message?.includes('Cannot find')) {
+        console.error('  [TUNNEL] localtunnel not installed. Run: npm install localtunnel');
+        console.error('  [TUNNEL] Or use one of these alternatives:');
+        console.error('    cloudflared tunnel --url http://localhost:' + PORT);
+        console.error('    npx localtunnel --port ' + PORT);
+        console.error('    ssh -R 80:localhost:' + PORT + ' serveo.net\n');
+      } else {
+        console.error('  [TUNNEL] Failed to start:', e.message);
+      }
+    }
+  } else {
+    console.log('  Open this URL in your browser to scan the QR code.');
+    console.log('  Remote server? Use: node pair-server.mjs --tunnel');
+    console.log('  Or manually:       cloudflared tunnel --url http://localhost:' + PORT);
+    console.log('');
+  }
+
+  connect();
+});
 
 // Safety timeout — 10 minutes
 setTimeout(() => {

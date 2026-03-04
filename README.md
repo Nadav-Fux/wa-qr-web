@@ -56,9 +56,19 @@ node pair-server.mjs
 
 Open `http://localhost:8899` in your browser. Scan the QR with WhatsApp > Linked Devices > Link a Device.
 
-### Remote Server (SSH)
+### Remote Server
 
-If you're running on a remote server, use a Cloudflare quick tunnel:
+If you're running on a remote server, you need a public URL so your phone can reach the QR page. Pick any option:
+
+#### Option A: Built-in tunnel (easiest — no signup, no extra tools)
+
+```bash
+node pair-server.mjs --tunnel
+```
+
+This uses [localtunnel](https://github.com/localtunnel/localtunnel) to create a temporary public URL. It prints the URL in the terminal — open it on your phone and scan.
+
+#### Option B: Cloudflare quick tunnel (if you have cloudflared)
 
 ```bash
 # Terminal 1
@@ -68,7 +78,24 @@ node pair-server.mjs
 cloudflared tunnel --url http://localhost:8899
 ```
 
-This gives you a temporary `https://xxxxx.trycloudflare.com` URL to open on your phone. No DNS or config needed — it disappears when you stop cloudflared.
+#### Option C: SSH reverse tunnel (works anywhere with SSH)
+
+```bash
+# From your local machine, forward the remote server's port
+ssh -L 8899:localhost:8899 user@your-server
+
+# Then open http://localhost:8899 on your local browser
+```
+
+#### Option D: npx one-liner (no install needed)
+
+```bash
+# Terminal 1
+node pair-server.mjs
+
+# Terminal 2
+npx localtunnel --port 8899
+```
 
 ## Configuration
 
@@ -80,6 +107,7 @@ This gives you a temporary `https://xxxxx.trycloudflare.com` URL to open on your
 | `WA_VERSION` | `[2,3000,1034074495]` | WhatsApp protocol version (update when 405 errors appear) |
 | `MAX_RECONNECTS` | `5` | Max reconnection attempts before cooldown kicks in |
 | `COOLDOWN_MS` | `300000` (5 min) | How long to wait after hitting the reconnect limit |
+| `TUNNEL` | `0` | Set to `1` to auto-start tunnel (same as `--tunnel` flag) |
 
 ```bash
 # Custom port
