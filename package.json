@@ -1,0 +1,27 @@
+{
+  "name": "wa-qr-web",
+  "version": "1.0.0",
+  "description": "Serve WhatsApp QR code on a web page for easy scanning — fixes terminal QR, 405, 515, and registered:false bugs",
+  "type": "module",
+  "main": "pair-server.mjs",
+  "scripts": {
+    "start": "node pair-server.mjs",
+    "tunnel": "cloudflared tunnel --url http://localhost:8899"
+  },
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "qr-code",
+    "pairing",
+    "whatsapp-web",
+    "whatsapp-bot",
+    "qr-server"
+  ],
+  "author": "Nadav Fux",
+  "license": "MIT",
+  "dependencies": {
+    "@hapi/boom": "^10.0.0",
+    "@whiskeysockets/baileys": "^7.0.0",
+    "qrcode": "^1.5.4"
+  }
+}
