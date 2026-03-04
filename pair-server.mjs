@@ -38,11 +38,54 @@ const WA_VERSION = process.env.WA_VERSION
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let latestQRBase64 = '';
-let status = 'waiting';     // waiting | scan | reconnecting | connected
+let status = 'waiting';     // waiting | scan | reconnecting | connected | rate-limited
 let connectedId = '';
 let qrCount = 0;
 
+// ─── Anti-Crash-Loop / Rate Limit Protection ─────────────────────────────────
+//
+// Without this, a misconfigured supervisor or process manager will restart
+// the script hundreds of times, hammering WhatsApp's servers. This gets your
+// IP soft-banned and makes the problem 10x worse.
+//
+// Real incident: Spark server crash-looped for 7 days because supervisor had
+// autorestart=true with no retry limit. Hundreds of reconnection attempts.
+//
+const MAX_RECONNECTS = parseInt(process.env.MAX_RECONNECTS || '5');  // max retries before cooldown
+const COOLDOWN_MS = parseInt(process.env.COOLDOWN_MS || '300000');   // 5 min cooldown after max retries
+let reconnectCount = 0;
+let lastReconnect = 0;
+
 // ─── WhatsApp Connection ─────────────────────────────────────────────────────
+
+function safeReconnect(delaySec, reason) {
+  reconnectCount++;
+  const now = Date.now();
+
+  // Reset counter if enough time passed since last reconnect (successful cooldown)
+  if (now - lastReconnect > COOLDOWN_MS) {
+    reconnectCount = 1;
+  }
+  lastReconnect = now;
+
+  if (reconnectCount > MAX_RECONNECTS) {
+    const cooldownMin = Math.round(COOLDOWN_MS / 60000);
+    console.error(`\n[RATE LIMIT] ${reconnectCount} reconnects — cooling down for ${cooldownMin} minutes.`);
+    console.error('[RATE LIMIT] This prevents WhatsApp from soft-banning your IP.');
+    console.error('[RATE LIMIT] If you keep hitting this, check your process manager config.\n');
+    status = 'rate-limited';
+
+    setTimeout(() => {
+      console.log('[RATE LIMIT] Cooldown over — retrying...');
+      reconnectCount = 0;
+      connect();
+    }, COOLDOWN_MS);
+    return;
+  }
+
+  console.log(`[RECONNECT ${reconnectCount}/${MAX_RECONNECTS}] ${reason} — retrying in ${delaySec}s...`);
+  setTimeout(connect, delaySec * 1000);
+}
 
 async function connect() {
   // Clean auth dir on first run
@@ -80,6 +123,7 @@ async function connect() {
     if (update.connection === 'open') {
       status = 'connected';
       connectedId = sock.user?.id || 'unknown';
+      reconnectCount = 0;  // Reset on successful connection
       console.log(`[OK] Connected as ${connectedId}`);
 
       // Fix the "registered: false" bug — Baileys doesn't always set this
@@ -105,21 +149,20 @@ async function connect() {
 
       if (reason === DisconnectReason.restartRequired || reason === 515) {
         // 515 = successful pairing, restart required. THIS IS NOT AN ERROR.
-        console.log('[515] Pairing successful — reconnecting with new credentials...');
         status = 'reconnecting';
-        setTimeout(connect, 2000);
+        safeReconnect(2, 'Pairing successful (515) — reconnecting with new credentials');
 
       } else if (reason === DisconnectReason.loggedOut || reason === 401) {
         // Session expired or device was unlinked
-        console.log('[401] Logged out — generating new QR...');
         status = 'waiting';
         latestQRBase64 = '';
         fs.rmSync(AUTH_DIR, { recursive: true, force: true });
         fs.mkdirSync(AUTH_DIR, { recursive: true });
-        setTimeout(connect, 2000);
+        safeReconnect(2, 'Logged out (401) — generating new QR');
 
       } else if (reason === 405) {
         // Protocol version outdated — this is the most common issue
+        // Do NOT reconnect — it will never work with the wrong version
         console.error('\n[ERROR] HTTP 405 — WhatsApp rejected the protocol version.');
         console.error('Your WA_VERSION is outdated. Check for the latest version:');
         console.error('  https://github.com/WhiskeySockets/Baileys/issues?q=405');
@@ -127,9 +170,7 @@ async function connect() {
         status = 'error-405';
 
       } else {
-        console.log(`[RECONNECT] Unknown close reason (${reason}), retrying in 5s...`);
-        setTimeout(connect, 5000);
-      }
+        safeReconnect(5, `Unknown close reason (${reason})`);
     }
   });
 }
@@ -154,6 +195,7 @@ img{max-width:300px;width:100%;border-radius:12px;background:#fff;padding:12px}
 .waiting{background:#334155;color:#94a3b8}
 .reconnecting{background:#f59e0b;color:#000}
 .error-405{background:#ef4444;color:#fff}
+.rate-limited{background:#f97316;color:#000}
 .steps{text-align:left;margin-top:16px;font-size:0.85em;opacity:0.7;line-height:1.8}
 .check{font-size:4em}
 .footer{margin-top:16px;opacity:0.4;font-size:0.8em}
@@ -177,6 +219,13 @@ const STEPS = `<div class="steps">
 4. Point camera at the QR code above
 </div>`;
 
+const RATE_LIMIT_MSG = `<div class="steps" style="color:#fed7aa">
+<strong>Too many reconnection attempts.</strong><br>
+The server is cooling down to avoid getting your IP soft-banned by WhatsApp.<br><br>
+This usually means your process manager (supervisor, pm2, systemd) is restarting the script in a loop.<br><br>
+<strong>Fix:</strong> Set <code style="background:#334155;padding:2px 6px;border-radius:4px">autorestart=false</code> or limit retries in your process manager config.
+</div>`;
+
 const ERROR_405_MSG = `<div class="steps" style="color:#fca5a5">
 <strong>Protocol version is outdated.</strong><br>
 WhatsApp rejected the connection. You need to update the version number:<br><br>
@@ -196,7 +245,7 @@ const server = http.createServer((req, res) => {
   // Health check endpoint (for monitoring)
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status, connectedId, qrCount }));
+    res.end(JSON.stringify({ status, connectedId, qrCount, reconnectCount, maxReconnects: MAX_RECONNECTS }));
     return;
   }
 
@@ -223,6 +272,11 @@ const server = http.createServer((req, res) => {
       statusText = 'Error 405 — Version Outdated';
       qrImg = '<div class="check">&#10060;</div>';
       extra = ERROR_405_MSG;
+      break;
+    case 'rate-limited':
+      statusText = `Rate Limited — Cooling Down (${Math.round(COOLDOWN_MS/60000)} min)`;
+      qrImg = '<div class="check">&#9200;</div>';
+      extra = RATE_LIMIT_MSG;
       break;
     default:
       statusText = 'Waiting for QR code...';

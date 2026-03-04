@@ -70,6 +70,8 @@ This gives you a temporary `https://xxxxx.trycloudflare.com` URL to open on your
 | `AUTH_DIR` | `./auth` | Where credentials are saved |
 | `BROWSER_NAME` | `WA-QR-Web` | Browser name shown in WhatsApp linked devices |
 | `WA_VERSION` | `[2,3000,1034074495]` | WhatsApp protocol version (update when 405 errors appear) |
+| `MAX_RECONNECTS` | `5` | Max reconnection attempts before cooldown kicks in |
+| `COOLDOWN_MS` | `300000` (5 min) | How long to wait after hitting the reconnect limit |
 
 ```bash
 # Custom port
@@ -80,6 +82,30 @@ AUTH_DIR=/path/to/creds node pair-server.mjs
 
 # Updated protocol version (when default goes stale)
 WA_VERSION="[2,3000,NEW_NUMBER]" node pair-server.mjs
+```
+
+## Anti-Crash-Loop Protection
+
+This is the feature that would have saved us a week of downtime.
+
+**The problem**: If you run Baileys behind a process manager (supervisor, pm2, systemd) with `autorestart=true` and something goes wrong (bad version, expired creds, network issue), the process manager will restart the script hundreds of times. Each restart = a new connection attempt to WhatsApp's servers. After enough attempts, WhatsApp soft-bans your IP. Now you can't connect even with the right code.
+
+**What happened to us**: Supervisor with `autorestart=true` and unlimited retries crash-looped wa_daemon for 7 days. Hundreds of reconnection attempts. We thought we were rate-limited, but the real problem was an outdated protocol version — we just couldn't tell because the crash loop was burying the real error.
+
+**How wa-qr-web protects you**:
+- Max 5 reconnection attempts (configurable via `MAX_RECONNECTS`)
+- After hitting the limit, waits 5 minutes before trying again (`COOLDOWN_MS`)
+- Resets the counter after a successful connection
+- **Never retries on 405** — the version is wrong, retrying won't help
+- Shows a clear warning on the web UI when rate-limited
+- Tells you to fix your process manager config
+
+**Supervisor config that won't crash-loop**:
+```ini
+[program:wa_daemon]
+autorestart=unexpected    ; NOT true — prevents infinite loops
+startretries=3            ; limit restart attempts
+startsecs=10              ; minimum uptime before considered "started"
 ```
 
 ## Bugs This Tool Fixes
@@ -133,13 +159,38 @@ cp -r auth/* /path/to/your/bot/credentials/
 docker cp auth/. my-container:/app/credentials/
 ```
 
+## Other Common Pitfalls
+
+### QR Code Expires Too Fast
+
+WhatsApp QR codes expire after ~60 seconds. If you're slow to scan, the server generates a new one automatically. The page auto-refreshes every 8 seconds so you'll always see the latest QR.
+
+### Multiple Devices / Existing Session
+
+If you already have a "WhatsApp Web" session linked on your phone, you may need to unlink it first before this tool can pair. Go to WhatsApp > Settings > Linked Devices and remove old sessions.
+
+### Firewall / Port Issues on Remote Servers
+
+If running on a VPS, port 8899 might be blocked by the firewall. Instead of opening the port, use a Cloudflare tunnel — it's temporary, secure, and requires zero config:
+```bash
+cloudflared tunnel --url http://localhost:8899
+```
+
+### Node.js Version
+
+Baileys v7 requires **Node.js 18+**. If you're on an older version, you'll get cryptic import errors.
+
+### WhatsApp Business vs Regular
+
+This tool works with both WhatsApp and WhatsApp Business. The pairing flow is identical.
+
 ## API
 
 | Endpoint | Description |
 |---|---|
 | `GET /` | Web page with QR code and status |
 | `GET /qr.png` | Raw QR code as PNG image |
-| `GET /health` | JSON status: `{ status, connectedId, qrCount }` |
+| `GET /health` | JSON: `{ status, connectedId, qrCount, reconnectCount, maxReconnects }` |
 
 ## License
 
