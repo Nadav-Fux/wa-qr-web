@@ -31,9 +31,10 @@ const BROWSER_NAME = process.env.BROWSER_NAME || 'WA-QR-Web';
 //
 // As of March 2026: 1034074495
 // Previous (broken):  1027934701
-const WA_VERSION = process.env.WA_VERSION
+const WA_VERSION_OVERRIDE = process.env.WA_VERSION
   ? JSON.parse(process.env.WA_VERSION)
-  : [2, 3000, 1034074495];
+  : null;
+const WA_VERSION_FALLBACK = [2, 3000, 1034074495];
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -87,11 +88,29 @@ function safeReconnect(delaySec, reason) {
   setTimeout(connect, delaySec * 1000);
 }
 
+let currentSock = null;  // Track socket for graceful shutdown
+
 async function connect() {
   // Clean auth dir on first run
   if (qrCount === 0) {
     fs.rmSync(AUTH_DIR, { recursive: true, force: true });
     fs.mkdirSync(AUTH_DIR, { recursive: true });
+  }
+
+  // Auto-fetch latest version from Baileys API, fall back to hardcoded
+  let version = WA_VERSION_OVERRIDE || WA_VERSION_FALLBACK;
+  if (!WA_VERSION_OVERRIDE) {
+    try {
+      const fetched = await fetchLatestBaileysVersion();
+      if (fetched?.version) {
+        version = fetched.version;
+        console.log(`[VERSION] Auto-fetched: ${JSON.stringify(version)}`);
+      }
+    } catch (e) {
+      console.log(`[VERSION] Auto-fetch failed, using fallback: ${JSON.stringify(version)}`);
+    }
+  } else {
+    console.log(`[VERSION] Using override: ${JSON.stringify(version)}`);
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -103,9 +122,10 @@ async function connect() {
     },
     printQRInTerminal: false,
     browser: [BROWSER_NAME, 'Chrome', '22.0'],
-    version: WA_VERSION,
+    version,
     qrTimeout: 60000,
   });
+  currentSock = sock;
 
   sock.ev.on('creds.update', saveCreds);
 
@@ -249,6 +269,23 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // Download credentials as tar.gz (for remote servers)
+  if (req.url === '/download-creds' && status === 'connected') {
+    try {
+      const { execSync } = await import('child_process');
+      const tarball = execSync(`tar -czf - -C "${AUTH_DIR}" .`);
+      res.writeHead(200, {
+        'Content-Type': 'application/gzip',
+        'Content-Disposition': 'attachment; filename="wa-credentials.tar.gz"',
+      });
+      res.end(tarball);
+    } catch (e) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Failed to create credentials archive: ' + e.message);
+    }
+    return;
+  }
+
   // Main page
   let statusText, qrImg, extra;
 
@@ -256,7 +293,9 @@ const server = http.createServer((req, res) => {
     case 'connected':
       statusText = `Connected as ${connectedId}`;
       qrImg = '<div class="check">&#9989;</div>';
-      extra = '<p style="opacity:0.7">Credentials saved to <code>' + AUTH_DIR + '/</code></p>';
+      extra = '<p style="opacity:0.7">Credentials saved to <code>' + AUTH_DIR + '/</code></p>'
+        + '<a href="/download-creds" style="display:inline-block;margin-top:12px;padding:10px 24px;background:#25D366;color:#000;border-radius:8px;text-decoration:none;font-weight:600">Download Credentials</a>'
+        + '<p style="opacity:0.5;font-size:0.8em;margin-top:8px">Extract with: tar -xzf wa-credentials.tar.gz -C ./auth</p>';
       break;
     case 'scan':
       statusText = 'Scan this QR code with WhatsApp';
@@ -305,3 +344,29 @@ setTimeout(() => {
     process.exit(1);
   }
 }, 600000);
+
+// ─── Graceful Shutdown ───────────────────────────────────────────────────────
+//
+// Without this, Ctrl+C leaves the WebSocket open. WhatsApp thinks you're still
+// connected, which can cause "device already linked" errors on the next attempt.
+//
+function shutdown(signal) {
+  console.log(`\n[${signal}] Shutting down gracefully...`);
+  if (currentSock) {
+    try {
+      currentSock.end(undefined);
+      console.log('[SHUTDOWN] WebSocket closed cleanly');
+    } catch (e) {
+      // Socket might already be closed
+    }
+  }
+  server.close(() => {
+    console.log('[SHUTDOWN] HTTP server closed');
+    process.exit(0);
+  });
+  // Force exit after 3 seconds if graceful shutdown hangs
+  setTimeout(() => process.exit(0), 3000);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

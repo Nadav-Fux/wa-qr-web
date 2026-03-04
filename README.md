@@ -23,6 +23,7 @@ This tool fixes all three.
 ```
 node pair-server.mjs
    │
+   ├─ Auto-fetches latest WhatsApp protocol version from Baileys API
    ├─ Starts WhatsApp connection with Baileys
    ├─ Captures QR from connection.update event
    ├─ Renders QR as PNG image (not ASCII)
@@ -31,10 +32,17 @@ node pair-server.mjs
    ├─ On successful scan:
    │   ├─ Handles exit code 515 (restart after pairing — NOT an error)
    │   ├─ Auto-fixes registered:false in creds.json
-   │   └─ Reconnects with saved credentials
+   │   ├─ Reconnects with saved credentials
+   │   └─ Shows "Download Credentials" button on the web page
    │
-   └─ On 405 error:
-       └─ Shows clear message with link to find the latest version
+   ├─ On 405 error:
+   │   └─ Shows clear message with link to find the latest version
+   │
+   ├─ Anti-crash-loop:
+   │   └─ Max 5 retries → 5-min cooldown → prevents IP soft-ban
+   │
+   └─ Graceful shutdown (Ctrl+C):
+       └─ Closes WebSocket cleanly so WhatsApp doesn't think you're still connected
 ```
 
 ## Quick Start
@@ -108,6 +116,15 @@ startretries=3            ; limit restart attempts
 startsecs=10              ; minimum uptime before considered "started"
 ```
 
+## Auto Version Detection
+
+The #1 failure mode is an outdated protocol version causing 405 errors. This tool **auto-fetches the latest version** from the Baileys API on startup. If the fetch fails (no internet, API down), it falls back to the hardcoded version.
+
+You can still override manually if needed:
+```bash
+WA_VERSION="[2,3000,NEW_NUMBER]" node pair-server.mjs
+```
+
 ## Bugs This Tool Fixes
 
 ### Bug 1: Terminal QR Codes Are Unscannable
@@ -149,15 +166,34 @@ startsecs=10              ; minimum uptime before considered "started"
 
 ## Transferring Credentials
 
-After pairing, your credentials are in the `auth/` directory. To use them with your WhatsApp bot:
+After pairing, your credentials are in the `auth/` directory.
+
+### Option 1: Download Button (remote servers)
+
+After successful pairing, the web page shows a **Download Credentials** button. Click it to get a `wa-credentials.tar.gz` file, then extract on your target machine:
 
 ```bash
-# Copy to your bot's credentials directory
+tar -xzf wa-credentials.tar.gz -C /path/to/your/bot/credentials/
+```
+
+### Option 2: Copy manually
+
+```bash
+# Local copy
 cp -r auth/* /path/to/your/bot/credentials/
 
-# Or for Docker containers
+# SCP from remote server
+scp -r user@server:~/wa-qr-web/auth/* ./credentials/
+
+# Docker containers
 docker cp auth/. my-container:/app/credentials/
 ```
+
+### Bug 5: Ghost Sessions After Ctrl+C
+
+**What happens**: You kill the pairing server with Ctrl+C. The WebSocket doesn't close properly. WhatsApp thinks you're still connected. Next time you try to pair, you get weird errors like "device already linked" or the QR won't generate.
+
+**Our fix**: SIGINT/SIGTERM handlers that close the WebSocket cleanly before exiting. WhatsApp is properly notified that the session ended.
 
 ## Other Common Pitfalls
 
@@ -191,6 +227,7 @@ This tool works with both WhatsApp and WhatsApp Business. The pairing flow is id
 | `GET /` | Web page with QR code and status |
 | `GET /qr.png` | Raw QR code as PNG image |
 | `GET /health` | JSON: `{ status, connectedId, qrCount, reconnectCount, maxReconnects }` |
+| `GET /download-creds` | Download credentials as `tar.gz` (only available after successful pairing) |
 
 ## License
 
